@@ -1,0 +1,15 @@
+{
+  "pet_id": "pet1",
+  "display_name": "Mochi",
+  "window_size": [128, 128],
+  "default_action": "idle",
+  "actions": {
+    "idle":   { "frame_count": 8,  "frame_duration_ms": 150, "looped": true  },
+    "walk":   { "frame_count": 12, "frame_duration_ms": 80,  "looped": true  },
+    "sleep":  { "frame_count": 4,  "frame_duration_ms": 400, "looped": true  },
+    "jump":   { "frame_count": 3,  "frame_duration_ms": 100, "looped": false },
+    "attack": { "frame_count": 8,  "frame_duration_ms": 80,  "looped": false },
+    "happy":  { "frame_count": 8,  "frame_duration_ms": 80,  "looped": false },
+    "angry":  { "frame_count": 4,  "frame_duration_ms": 120, "looped": false }
+  }
+}
