@@ -9,7 +9,7 @@ edition = "2021"
 [workspace.dependencies]
 # --- Window & Rendering ---
 winit  = "0.30"
-pixels = "0.14"
+pixels = "0.17"
 image  = { version = "0.25", default-features = false, features = ["png"] }
 
 # --- Async Runtime ---

@@ -67,7 +67,7 @@ cargo run -p cli_app -- stop           # shut down daemon
 | Role | Crate | Version |
 |---|---|---|
 | Window | `winit` | 0.30 |
-| Renderer | `pixels` | 0.14 |
+| Renderer | `pixels` | 0.17 |
 | PNG decode | `image` | 0.25 |
 | Async runtime | `tokio` (multi-thread) | 1 |
 | HTTP | `reqwest` (rustls-tls) | 0.12 |

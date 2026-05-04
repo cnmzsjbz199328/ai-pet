@@ -36,8 +36,16 @@ pub struct PetApp {
     /// 来自 Tokio 任务的消息通道接收端。
     pub rx: std::sync::mpsc::Receiver<AppMessage>,
     window: Option<Arc<Window>>,
-    /// pixels 帧缓冲（pixels 0.14 的 `Pixels` 无生命周期参数）。
-    pixels: Option<Pixels>,
+    /// pixels 帧缓冲。
+    ///
+    /// `pixels 0.17` 的 `Pixels<'surf>` 通过 `raw-window-handle 0.6` 持有窗口引用，
+    /// 而 `ApplicationHandler` 要求所有状态自含于结构体（自引用结构体在安全 Rust 中
+    /// 无法表达），因此使用 `'static` 生命周期。
+    ///
+    /// 对应地，`try_init_window` 中通过 `Box::leak` 将 `Arc<Window>` 提升为
+    /// `'static` 引用：这是**一次性有界泄漏**（固定大小，随进程退出回收），
+    /// 对主窗口生命周期等于应用生命周期的场景是可接受的权衡。
+    pixels: Option<Pixels<'static>>,
     pub animator: Animator,
     state_machine: StateMachine,
     timeline: Timeline,
@@ -81,11 +89,14 @@ impl PetApp {
 
         let window = Arc::new(event_loop.create_window(window_attributes)?);
 
-        // pixels 0.14：SurfaceTexture 在 build() 时被消耗，
-        // Pixels 自身不持有窗口引用，无需 'static 或 Box::leak。
+        // pixels 0.17 要求 SurfaceTexture 持有 &'surf W（raw-window-handle 0.6），
+        // 且 Pixels<'surf> 将该生命周期传递给 wgpu Surface。
+        // ApplicationHandler 不支持自引用结构体，故将 Arc<Window> 克隆一份后
+        // 通过 Box::leak 提升为 &'static Window（一次性有界泄漏，随进程退出回收）。
+        let window_ref: &'static Window = Box::leak(Box::new(Arc::clone(&window)));
         let pixels = {
             let surface_texture =
-                SurfaceTexture::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, &*window);
+                SurfaceTexture::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, window_ref);
             PixelsBuilder::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, surface_texture)
                 .clear_color(pixels::wgpu::Color::TRANSPARENT)
                 .build()?
