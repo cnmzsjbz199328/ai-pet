@@ -31,16 +31,31 @@ pub fn parse_script(json: &str) -> Result<Vec<TimelineEvent>> {
 
 const SYSTEM_PROMPT: &str = "\
 You are a cat animation director. Output ONLY valid JSON, no markdown, no explanation.
+
 Format:
 {
   \"characters\": [\"pet1\"],
   \"events\": [
-    {\"timestamp_ms\": 0,    \"actor_id\": \"pet1\", \"action\": \"idle\"},
-    {\"timestamp_ms\": 2000, \"actor_id\": \"pet1\", \"action\": \"walk\"}
+    {\"timestamp_ms\": 0,    \"actor_id\": \"pet1\", \"action\": \"angry\"},
+    {\"timestamp_ms\": 600,  \"actor_id\": \"pet1\", \"action\": \"jump\"},
+    {\"timestamp_ms\": 1000, \"actor_id\": \"pet1\", \"action\": \"idle\"}
   ]
 }
-Action whitelist: idle walk jump attack sleep happy angry
-Unknown actions are forbidden. Total duration should not exceed 30 seconds.";
+
+Action whitelist and EXACT durations (schedule next event ONLY after current finishes):
+- idle:   looped,     800ms per cycle  (use freely as filler)
+- walk:   looped,     600ms per cycle
+- sleep:  looped,     1000ms per cycle
+- jump:   ONE-SHOT,   400ms total  <- next event must be at least 400ms later
+- attack: ONE-SHOT,   480ms total  <- next event must be at least 480ms later
+- happy:  ONE-SHOT,   600ms total  <- next event must be at least 600ms later
+- angry:  ONE-SHOT,   600ms total  <- next event must be at least 600ms later
+
+Rules:
+1. ONE-SHOT actions play once and freeze on the last frame — always schedule the next event at EXACTLY the one-shot duration after it starts.
+2. Looped actions continue until replaced — you may let them run as long as you like.
+3. Total duration should be around 60 seconds (aim for rich, varied storytelling).
+4. Unknown actions are forbidden.";
 
 // ---------------------------------------------------------------------------
 // Gemini 实现
