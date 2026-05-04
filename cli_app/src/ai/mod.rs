@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use core_engine::scripting::TimelineEvent;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 /// LLM 客户端抽象，通过 trait 实现与具体 API 的解耦（便于 Mock 测试）。
