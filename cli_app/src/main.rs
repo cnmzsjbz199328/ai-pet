@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use winit::event_loop::EventLoop;
+use winit::event_loop::{ControlFlow, EventLoop};
 
 use core_engine::animation::{Animation, Animator};
 use core_engine::scripting::Action;
@@ -100,8 +100,9 @@ fn main() -> Result<()> {
                 }
             });
 
-            // 6. 运行 winit 事件循环
+            // 6. 运行 winit 事件循环（Poll 模式：持续轮询，驱动动画游戏循环）
             let event_loop = EventLoop::new()?;
+            event_loop.set_control_flow(ControlFlow::Poll);
             let mut app = PetApp::new(rx, animator);
             event_loop.run_app(&mut app).context("Event loop failed")
         }

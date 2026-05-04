@@ -98,6 +98,7 @@ impl PetApp {
             let surface_texture =
                 SurfaceTexture::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, window_ref);
             PixelsBuilder::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, surface_texture)
+                .wgpu_backend(pixels::wgpu::Backends::GL) // DX12 在 Poll 模式下 get_current_texture() 死锁
                 .clear_color(pixels::wgpu::Color::TRANSPARENT)
                 .build()?
         };
@@ -145,6 +146,11 @@ impl PetApp {
 }
 
 impl ApplicationHandler for PetApp {
+    /// 每次事件循环迭代开始时调用，确保 Poll 模式持续生效。
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -265,10 +271,14 @@ impl ApplicationHandler for PetApp {
             self.animator.set_action(Action::Idle);
         }
 
-        // 5. 更新帧缓冲并请求重绘
+        // 5. 更新帧缓冲并直接渲染（不依赖 RedrawRequested：
+        //    Windows Poll 模式下 WM_PAINT 低优先级会被饿死）
         self.draw_sprite(delta);
-        if let Some(window) = &self.window {
-            window.request_redraw();
+        if let Some(pixels) = &mut self.pixels {
+            if let Err(err) = pixels.render() {
+                tracing::error!("pixels.render error: {}", err);
+                event_loop.exit();
+            }
         }
     }
 }
