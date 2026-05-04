@@ -28,3 +28,4 @@ tracing-subscriber = { workspace = true }
 thiserror  = { workspace = true }
 anyhow     = { workspace = true }
 dirs-next  = "2"
+dotenvy    = "0.15"

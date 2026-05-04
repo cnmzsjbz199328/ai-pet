@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::EventLoop;
 
-use crate::ai::{LlmClient, MockLlmClient, OpenAiClient};
+use crate::ai::{GeminiClient, LlmClient, MockLlmClient};
 use crate::config::PetConfig;
 use crate::window::PetApp;
 use core_engine::animation::{Animation, Animator};
@@ -46,6 +46,9 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    // 加载 .env 文件（文件不存在时静默忽略）
+    let _ = dotenvy::dotenv();
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -191,13 +194,12 @@ fn run_daemon() -> Result<()> {
     let animations = load_all_animations(&config, Path::new("assets/sprites"))?;
     let animator = Animator::new(animations);
 
-    // 3. 设置 LLM 客户端
-    let api_key = std::env::var("OPENAI_API_KEY").ok();
-    let llm: Arc<dyn LlmClient> = if let Some(key) = api_key {
-        tracing::info!("Using OpenAI LLM client");
-        Arc::new(OpenAiClient::new(key))
+    // 3. 设置 LLM 客户端（优先使用 GEMINI_API_KEY，其次 Mock）
+    let llm: Arc<dyn LlmClient> = if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+        tracing::info!("Using Gemini LLM client");
+        Arc::new(GeminiClient::new(key))
     } else {
-        tracing::warn!("OPENAI_API_KEY not found, falling back to Mock LLM client");
+        tracing::warn!("GEMINI_API_KEY not found, falling back to Mock LLM client");
         Arc::new(MockLlmClient {
             preset_response: r#"{
                 "characters": ["pet1"],
@@ -226,9 +228,8 @@ fn run_daemon() -> Result<()> {
         }
     });
 
-    // 6. 运行 winit 事件循环（Poll 模式：持续轮询，驱动动画游戏循环）
+    // 6. 运行 winit 事件循环
     let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = PetApp::new(rx, animator);
     event_loop.run_app(&mut app).context("Event loop failed")
 }

@@ -26,7 +26,7 @@ pub fn parse_script(json: &str) -> Result<Vec<TimelineEvent>> {
 }
 
 // ---------------------------------------------------------------------------
-// OpenAI 实现（Task 10 实现）
+// 共用 System Prompt
 // ---------------------------------------------------------------------------
 
 const SYSTEM_PROMPT: &str = "\
@@ -41,6 +41,70 @@ Format:
 }
 Action whitelist: idle walk jump attack sleep happy angry
 Unknown actions are forbidden. Total duration should not exceed 30 seconds.";
+
+// ---------------------------------------------------------------------------
+// Gemini 实现
+// ---------------------------------------------------------------------------
+
+pub struct GeminiClient {
+    api_key: String,
+    model: String,
+    http: reqwest::Client,
+}
+
+impl GeminiClient {
+    pub fn new(api_key: String) -> Self {
+        Self {
+            api_key,
+            model: std::env::var("GEMINI_MODEL")
+                .unwrap_or_else(|_| "gemini-3-flash-preview".to_string()),
+            http: reqwest::Client::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmClient for GeminiClient {
+    async fn generate_script(&self, prompt: &str) -> Result<String> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            self.model
+        );
+
+        let body = json!({
+            "system_instruction": {
+                "parts": [{"text": SYSTEM_PROMPT}]
+            },
+            "contents": [
+                {"role": "user", "parts": [{"text": prompt}]}
+            ],
+            "generationConfig": {
+                "temperature": 0.7,
+                "responseMimeType": "application/json"
+            }
+        });
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("x-goog-api-key", &self.api_key)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
+
+        resp["candidates"][0]["content"]["parts"][0]["text"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("Unexpected Gemini response shape: {}", resp))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI 实现（保留备用）
+// ---------------------------------------------------------------------------
 
 pub struct OpenAiClient {
     api_key: String,
@@ -68,7 +132,8 @@ impl LlmClient for OpenAiClient {
             "temperature": 0.7
         });
 
-        let resp = self.http
+        let resp = self
+            .http
             .post("https://api.openai.com/v1/chat/completions")
             .bearer_auth(&self.api_key)
             .json(&body)

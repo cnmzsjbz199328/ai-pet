@@ -79,16 +79,15 @@ pub mod windows {
             tokio::spawn(async move {
                 tracing::info!("Generating script for prompt: {}", prompt_owned);
                 match llm_clone.generate_script(&prompt_owned).await {
-                    Ok(script_json) => {
-                        match crate::ai::parse_script(&script_json) {
-                            Ok(events) => {
-                                let _ = tx_clone.send(AppMessage::InjectTimeline(events));
-                            }
-                            Err(err) => {
-                                let _ = tx_clone.send(AppMessage::LlmError(format!("Parse error: {}", err)));
-                            }
+                    Ok(script_json) => match crate::ai::parse_script(&script_json) {
+                        Ok(events) => {
+                            let _ = tx_clone.send(AppMessage::InjectTimeline(events));
                         }
-                    }
+                        Err(err) => {
+                            let _ = tx_clone
+                                .send(AppMessage::LlmError(format!("Parse error: {}", err)));
+                        }
+                    },
                     Err(err) => {
                         let _ = tx_clone.send(AppMessage::LlmError(format!("LLM error: {}", err)));
                     }

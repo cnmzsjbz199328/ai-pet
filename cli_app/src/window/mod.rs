@@ -98,7 +98,7 @@ impl PetApp {
             let surface_texture =
                 SurfaceTexture::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, window_ref);
             PixelsBuilder::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, surface_texture)
-                .wgpu_backend(pixels::wgpu::Backends::GL) // DX12 在 Poll 模式下 get_current_texture() 死锁
+                .wgpu_backend(pixels::wgpu::Backends::GL) // DX12 在 Poll/WaitUntil 模式下 get_current_texture() 不稳定
                 .clear_color(pixels::wgpu::Color::TRANSPARENT)
                 .build()?
         };
@@ -147,8 +147,8 @@ impl PetApp {
 
 impl ApplicationHandler for PetApp {
     /// 每次事件循环迭代开始时调用，确保 Poll 模式持续生效。
-    fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
-        event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
+        // 不再强制设置为 Poll，而是由 about_to_wait 控制
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -176,23 +176,25 @@ impl ApplicationHandler for PetApp {
             // - 按下时记录起始位置；
             // - CursorMoved 超过阈值时开始拖拽；
             // - 释放时若未触发拖拽则视为点击，驱动 FSM。
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                match state {
-                    ElementState::Pressed => {
-                        self.mouse_left_pressed = true;
-                        self.mouse_press_pos = None;
-                        self.is_dragging = false;
-                    }
-                    ElementState::Released => {
-                        if self.mouse_left_pressed && !self.is_dragging {
-                            self.state_machine.apply(FsmInput::Click);
-                        }
-                        self.mouse_left_pressed = false;
-                        self.mouse_press_pos = None;
-                        self.is_dragging = false;
-                    }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => match state {
+                ElementState::Pressed => {
+                    self.mouse_left_pressed = true;
+                    self.mouse_press_pos = None;
+                    self.is_dragging = false;
                 }
-            }
+                ElementState::Released => {
+                    if self.mouse_left_pressed && !self.is_dragging {
+                        self.state_machine.apply(FsmInput::Click);
+                    }
+                    self.mouse_left_pressed = false;
+                    self.mouse_press_pos = None;
+                    self.is_dragging = false;
+                }
+            },
 
             WindowEvent::CursorMoved { position, .. } => {
                 if self.mouse_left_pressed && !self.is_dragging {
@@ -271,8 +273,7 @@ impl ApplicationHandler for PetApp {
             self.animator.set_action(Action::Idle);
         }
 
-        // 5. 更新帧缓冲并直接渲染（不依赖 RedrawRequested：
-        //    Windows Poll 模式下 WM_PAINT 低优先级会被饿死）
+        // 5. 更新帧缓冲并直接渲染
         self.draw_sprite(delta);
         if let Some(pixels) = &mut self.pixels {
             if let Err(err) = pixels.render() {
@@ -280,5 +281,10 @@ impl ApplicationHandler for PetApp {
                 event_loop.exit();
             }
         }
+
+        // 6. 避免死锁并控制帧率：使用 WaitUntil (30fps)
+        event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(33)
+        ));
     }
 }
