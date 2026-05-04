@@ -7,42 +7,48 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use anyhow::Result;
 use pixels::{Pixels, PixelsBuilder, SurfaceTexture};
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
+use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId, WindowLevel};
 
 use core_engine::animation::Animator;
+use core_engine::scripting::Action;
 use core_engine::state_machine::{FsmInput, PetState, StateMachine};
 use core_engine::timeline::Timeline;
 
 use crate::ipc::AppMessage;
 
-/// 将 80x64 的精灵图居中缩放绘制到 128x128 缓冲。
-/// 使用最近邻插值。
+/// 精灵原始尺寸（80×64px）。
 const SPRITE_WIDTH: usize = 80;
 const SPRITE_HEIGHT: usize = 64;
+/// 浮窗尺寸（128×128px）。
 const WINDOW_WIDTH: usize = 128;
 const WINDOW_HEIGHT: usize = 128;
+/// 鼠标移动超过此距离（物理像素）才视为拖拽，否则视为点击。
+const DRAG_THRESHOLD: f64 = 5.0;
 
 /// 持有窗口渲染状态与跨线程消息接收端。
 pub struct PetApp {
     /// 来自 Tokio 任务的消息通道接收端。
     pub rx: std::sync::mpsc::Receiver<AppMessage>,
-    /// winit 窗口对象。
-    pub window: Option<Arc<Window>>,
-    /// pixels 帧缓冲。
-    pub pixels: Option<Pixels<'static>>,
-    /// 动画引擎。
+    window: Option<Arc<Window>>,
+    /// pixels 帧缓冲（pixels 0.14 的 `Pixels` 无生命周期参数）。
+    pixels: Option<Pixels>,
     pub animator: Animator,
-    /// 状态机。
-    pub state_machine: StateMachine,
-    /// 时间轴调度器。
-    pub timeline: Timeline,
-    /// 上一帧的时间戳，用于计算 delta time。
-    pub last_tick: Instant,
+    state_machine: StateMachine,
+    timeline: Timeline,
+    last_tick: Instant,
+    /// 上一帧 `timeline.finished` 的值，用于检测 false→true 跳变，
+    /// 确保 `TimelineFinished` 事件只发送一次。
+    timeline_was_finished: bool,
+    // --- 鼠标状态（用于区分点击与拖拽）---
+    mouse_left_pressed: bool,
+    mouse_press_pos: Option<PhysicalPosition<f64>>,
+    is_dragging: bool,
 }
 
 impl PetApp {
@@ -55,10 +61,44 @@ impl PetApp {
             state_machine: StateMachine::new(),
             timeline: Timeline::new(),
             last_tick: Instant::now(),
+            timeline_was_finished: true,
+            mouse_left_pressed: false,
+            mouse_press_pos: None,
+            is_dragging: false,
         }
     }
 
-    /// 将 80x64 的精灵图绘制到 128x128 的 pixels 缓冲中（带缩放和居中）。
+    /// 窗口创建与 pixels 初始化的内部实现，使用 `?` 传播错误。
+    /// 由 `resumed` 调用；出错时记录日志并退出事件循环。
+    fn try_init_window(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        let window_attributes = Window::default_attributes()
+            .with_title("ai-pet")
+            .with_transparent(true)
+            .with_decorations(false)
+            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_inner_size(LogicalSize::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32))
+            .with_resizable(false);
+
+        let window = Arc::new(event_loop.create_window(window_attributes)?);
+
+        // pixels 0.14：SurfaceTexture 在 build() 时被消耗，
+        // Pixels 自身不持有窗口引用，无需 'static 或 Box::leak。
+        let pixels = {
+            let surface_texture =
+                SurfaceTexture::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, &*window);
+            PixelsBuilder::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, surface_texture)
+                .clear_color(pixels::wgpu::Color::TRANSPARENT)
+                .build()?
+        };
+
+        self.pixels = Some(pixels);
+        self.window = Some(window);
+        self.last_tick = Instant::now();
+        tracing::info!("Window created and pixels initialized");
+        Ok(())
+    }
+
+    /// 将当前动画帧写入 pixels 缓冲（最近邻插值，80×64 → 128×128）。
     fn draw_sprite(&mut self, delta: std::time::Duration) {
         let texture = match self.animator.update(delta) {
             Ok(t) => t,
@@ -74,18 +114,14 @@ impl PetApp {
         };
 
         let frame = pixels.frame_mut();
-        // 1. 清空缓冲（全透明）
+        // 清空为全透明
         frame.fill(0);
 
-        // 2. 居中缩放绘制（最近邻插值）
-        // 计算缩放：80->128 (x1.6), 64->128 (x2.0)
-        // 实际上我们直接遍历目标像素 (128x128)，反查源像素 (80x64)
+        // 遍历目标像素，反查源像素（最近邻）
         for y in 0..WINDOW_HEIGHT {
             for x in 0..WINDOW_WIDTH {
-                // 反查坐标
                 let src_x = (x * SPRITE_WIDTH / WINDOW_WIDTH).min(SPRITE_WIDTH - 1);
                 let src_y = (y * SPRITE_HEIGHT / WINDOW_HEIGHT).min(SPRITE_HEIGHT - 1);
-
                 let pixel = texture.get_pixel(src_x as u32, src_y as u32);
                 let idx = (y * WINDOW_WIDTH + x) * 4;
                 frame[idx] = pixel[0];
@@ -98,83 +134,91 @@ impl PetApp {
 }
 
 impl ApplicationHandler for PetApp {
-
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
-
-        // 1. 创建透明、无边框、始终置顶的窗口
-        let window_attributes = Window::default_attributes()
-            .with_title("ai-pet")
-            .with_transparent(true)
-            .with_decorations(false)
-            .with_window_level(WindowLevel::AlwaysOnTop)
-            .with_inner_size(LogicalSize::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32))
-            .with_resizable(false);
-
-        let window = Arc::new(event_loop.create_window(window_attributes).expect("failed to create window"));
-        self.window = Some(window.clone());
-
-        // 使用 Box::leak 获取 'static 引用以满足 Pixels<'static> 的要求
-        // 在桌面宠物应用中，主窗口生命周期即应用生命周期，此泄漏是可接受的。
-        let leaked_arc: &'static Arc<Window> = Box::leak(Box::new(window));
-        let window_static: &'static Window = leaked_arc;
-
-        // 2. 初始化 pixels 帧缓冲
-        let pixels = {
-            let surface_texture = SurfaceTexture::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, window_static);
-            PixelsBuilder::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32, surface_texture)
-                .clear_color(pixels::wgpu::Color::TRANSPARENT)
-                .build()
-                .expect("failed to create pixels")
-        };
-        self.pixels = Some(pixels);
-
-        self.last_tick = Instant::now();
-        tracing::info!("Window created and pixels initialized");
+        if let Err(err) = self.try_init_window(event_loop) {
+            tracing::error!("Failed to initialize window: {}", err);
+            event_loop.exit();
+        }
     }
 
     fn window_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         _window_id: WindowId,
         event: WindowEvent,
     ) {
         match event {
             WindowEvent::CloseRequested => {
-                _event_loop.exit();
+                event_loop.exit();
             }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
-                ..
-            } => {
-                // 点击进入 Acting 状态（Task 7 要求）
-                self.state_machine.apply(FsmInput::Click);
-                if let Some(window) = &self.window {
-                    let _ = window.drag_window();
-                }
-            }
-            WindowEvent::RedrawRequested => {
-                // RedrawRequested 仅负责渲染，更新逻辑放在 about_to_wait
-                if let Some(pixels) = &mut self.pixels {
-                    if let Err(err) = pixels.render() {
-                        tracing::error!("pixels.render error: {}", err);
-                        _event_loop.exit();
+
+            // 区分点击与拖拽：
+            // - 按下时记录起始位置；
+            // - CursorMoved 超过阈值时开始拖拽；
+            // - 释放时若未触发拖拽则视为点击，驱动 FSM。
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                match state {
+                    ElementState::Pressed => {
+                        self.mouse_left_pressed = true;
+                        self.mouse_press_pos = None;
+                        self.is_dragging = false;
+                    }
+                    ElementState::Released => {
+                        if self.mouse_left_pressed && !self.is_dragging {
+                            self.state_machine.apply(FsmInput::Click);
+                        }
+                        self.mouse_left_pressed = false;
+                        self.mouse_press_pos = None;
+                        self.is_dragging = false;
                     }
                 }
             }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                if self.mouse_left_pressed && !self.is_dragging {
+                    let over_threshold = match self.mouse_press_pos {
+                        Some(start) => {
+                            let dx = position.x - start.x;
+                            let dy = position.y - start.y;
+                            (dx * dx + dy * dy).sqrt() > DRAG_THRESHOLD
+                        }
+                        None => {
+                            self.mouse_press_pos = Some(position);
+                            false
+                        }
+                    };
+                    if over_threshold {
+                        self.is_dragging = true;
+                        self.state_machine.apply(FsmInput::Drag);
+                        if let Some(window) = &self.window {
+                            let _ = window.drag_window();
+                        }
+                    }
+                }
+            }
+
+            WindowEvent::RedrawRequested => {
+                if let Some(pixels) = &mut self.pixels {
+                    if let Err(err) = pixels.render() {
+                        tracing::error!("pixels.render error: {}", err);
+                        event_loop.exit();
+                    }
+                }
+            }
+
             _ => (),
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
         let delta = now.duration_since(self.last_tick);
         self.last_tick = now;
 
-        // 1. 处理来自 IPC/LLM 的消息
+        // 1. 排空消息队列
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 AppMessage::InjectTimeline(events) => {
@@ -186,34 +230,34 @@ impl ApplicationHandler for PetApp {
                     self.state_machine.apply(FsmInput::LlmError);
                 }
                 AppMessage::Shutdown => {
-                    _event_loop.exit();
+                    event_loop.exit();
                     return;
                 }
             }
         }
 
-        // 2. 推进时间轴并更新动画动作
-        let events = self.timeline.tick(delta);
-        for event in events {
+        // 2. 推进时间轴，将到期事件的动作同步到 Animator
+        let due = self.timeline.tick(delta);
+        for event in due {
             self.animator.set_action(event.action);
         }
 
-        if self.timeline.finished {
+        // 3. 仅在 finished 发生 false→true 跳变时通知 FSM，避免每帧重复触发
+        let just_finished = !self.timeline_was_finished && self.timeline.finished;
+        if just_finished {
             self.state_machine.apply(FsmInput::TimelineFinished);
         }
+        self.timeline_was_finished = self.timeline.finished;
 
-        // 3. 根据 FSM 状态强制动作（例如 Acting 状态下可能需要特定动画）
-        // 如果 Timeline 已空且处于 Idle，Animator 会保持当前动作（通常是 Idle）
-        if self.state_machine.state() == PetState::Idle 
-           && self.timeline.finished {
-            self.animator.set_action(core_engine::scripting::Action::Idle);
+        // 4. Idle 状态下确保动画回到 idle 动作
+        if self.state_machine.state() == PetState::Idle && self.timeline.finished {
+            self.animator.set_action(Action::Idle);
         }
 
-        // 4. 重绘
+        // 5. 更新帧缓冲并请求重绘
         self.draw_sprite(delta);
         if let Some(window) = &self.window {
             window.request_redraw();
         }
     }
 }
-

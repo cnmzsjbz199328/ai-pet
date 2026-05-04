@@ -2,6 +2,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod ai;
+mod config;
 mod ipc;
 mod window;
 
@@ -12,12 +13,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use serde::Deserialize;
 use winit::event_loop::EventLoop;
 
 use core_engine::animation::{Animation, Animator};
 use core_engine::scripting::Action;
 use crate::ai::{LlmClient, MockLlmClient, OpenAiClient};
+use crate::config::PetConfig;
 use crate::window::PetApp;
 
 #[derive(Parser)]
@@ -38,18 +39,6 @@ enum Command {
     },
     /// 关闭守护进程
     Stop,
-}
-
-#[derive(Deserialize)]
-struct PetConfig {
-    actions: HashMap<String, ActionConfig>,
-}
-
-#[derive(Deserialize)]
-struct ActionConfig {
-    frame_count: usize,
-    frame_duration_ms: u64,
-    looped: bool,
 }
 
 fn main() -> Result<()> {
@@ -133,10 +122,10 @@ fn main() -> Result<()> {
     }
 }
 
-fn load_all_animations(config: &PetConfig, sprites_dir: &Path) -> Result<HashMap<Action, Animation>> {
+fn load_all_animations(pet_config: &PetConfig, sprites_dir: &Path) -> Result<HashMap<Action, Animation>> {
     let mut animations = HashMap::new();
 
-    for (action_name, action_cfg) in &config.actions {
+    for (action_name, action_cfg) in &pet_config.actions {
         let action = Action::from_str_or_fallback(action_name);
         
         // 避开 Unknown 映射

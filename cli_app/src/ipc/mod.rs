@@ -29,11 +29,14 @@ pub mod windows {
         tx: std::sync::mpsc::Sender<AppMessage>,
         llm: std::sync::Arc<dyn crate::ai::LlmClient>,
     ) -> Result<()> {
+        // 仅第一次创建时声明独占实例；后续重建时允许同名管道存在
+        let mut first_instance = true;
         loop {
             // Named Pipe 服务端每次 connect 后需重新创建实例以接受下一个连接
             let mut server = ServerOptions::new()
-                .first_pipe_instance(true)
+                .first_pipe_instance(first_instance)
                 .create(PIPE_NAME)?;
+            first_instance = false;
 
             tracing::debug!("IPC server waiting for connection...");
             server.connect().await?;
