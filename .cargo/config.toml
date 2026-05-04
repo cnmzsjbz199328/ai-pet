@@ -1,0 +1,3 @@
+[build]
+# 将编译产物输出到 OneDrive 外部，避免 OneDrive 实时同步锁文件导致链接器失败。
+target-dir = "C:/cargo-build/ai-pet"
