@@ -1,5 +1,5 @@
 {
-  "pet_id": "pet1",
+  "pet_id": "mochi",
   "display_name": "Mochi",
   "window_size": [128, 128],
   "default_action": "idle",
@@ -11,5 +11,8 @@
     "attack": { "frame_count": 8,  "frame_duration_ms": 80,  "looped": false },
     "happy":  { "frame_count": 8,  "frame_duration_ms": 80,  "looped": false },
     "angry":  { "frame_count": 4,  "frame_duration_ms": 120, "looped": false }
+  },
+  "effects": {
+    "shockwave": { "frame_count": 16, "frame_duration_ms": 40, "looped": false }
   }
 }

@@ -202,11 +202,27 @@ fn run_daemon() -> Result<()> {
         .with_context(|| format!("Failed to read config: {:?}", config_path))?;
     let config: PetConfig = serde_json::from_str(&config_json)?;
 
-    // 2. 加载精灵图
-    let animations = load_all_animations(&config, &assets.join("sprites"))?;
+    // 2. 加载角色精灵图（sprites/<pet_id>/<action>/）
+    let char_dir = assets.join("sprites").join(&config.pet_id);
+    tracing::info!("Character sprites dir: {:?}", char_dir);
+    let animations = load_all_animations(&config, &char_dir)?;
     let animator = Animator::new(animations);
 
-    // 3. 设置 LLM 客户端（优先使用 GEMINI_API_KEY，其次 Mock）
+    // 3. 从 config.effects 加载特效精灵图（sprites/effects/<name>/）
+    let effects_dir = assets.join("sprites/effects");
+    let mut effect_animations: HashMap<String, Animation> = HashMap::new();
+    for (name, cfg) in &config.effects {
+        let dir = effects_dir.join(name);
+        if dir.exists() {
+            tracing::info!("Loading effect '{}' from {:?}", name, dir);
+            let anim = load_animation_dir(&dir, cfg.frame_count, cfg.frame_duration_ms, cfg.looped)?;
+            effect_animations.insert(name.clone(), anim);
+        } else {
+            tracing::warn!("Effect sprite not found, skipping: {:?}", dir);
+        }
+    }
+
+    // 4. 设置 LLM 客户端（优先使用 GEMINI_API_KEY，其次 Mock）
     let gemini_key = std::env::var("GEMINI_API_KEY").ok().filter(|k| !k.is_empty());
     let llm: Arc<dyn LlmClient> = if let Some(key) = gemini_key {
         tracing::info!("Using Gemini LLM client");
@@ -246,10 +262,10 @@ fn run_daemon() -> Result<()> {
         })
     };
 
-    // 4. 创建跨线程通道
+    // 5. 创建跨线程通道
     let (tx, rx) = std::sync::mpsc::channel();
 
-    // 5. 启动 Tokio 运行时并运行 IPC 服务端
+    // 6. 启动 Tokio 运行时并运行 IPC 服务端
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -262,9 +278,14 @@ fn run_daemon() -> Result<()> {
         }
     });
 
-    // 6. 运行 winit 事件循环
+    // 7. 运行 winit 事件循环
     let event_loop = EventLoop::new()?;
     let mut app = PetApp::new(rx, animator);
+
+    if let Some(anim) = effect_animations.remove("shockwave") {
+        app.set_shockwave_template(anim);
+    }
+
     event_loop.run_app(&mut app).context("Event loop failed")
 }
 
@@ -272,9 +293,34 @@ fn run_daemon() -> Result<()> {
 // 资产加载
 // ---------------------------------------------------------------------------
 
+/// 将目录 `dir` 下编号为 `001.png`…`N.png` 的帧加载为一个 `Animation`。
+/// 由角色动作加载和特效加载共享，避免重复逻辑。
+fn load_animation_dir(
+    dir: &Path,
+    frame_count: usize,
+    duration_ms: u64,
+    looped: bool,
+) -> Result<Animation> {
+    let mut frames = Vec::with_capacity(frame_count);
+    for i in 1..=frame_count {
+        let path = dir.join(format!("{i:03}.png"));
+        let img = image::open(&path)
+            .with_context(|| format!("Failed to load sprite frame: {:?}", path))?
+            .to_rgba8();
+        frames.push(Arc::new(img));
+    }
+    Ok(Animation {
+        frames,
+        frame_duration: Duration::from_millis(duration_ms),
+        looped,
+    })
+}
+
+/// 根据配置加载角色的全部动作动画。
+/// `char_dir` 为角色精灵根目录（`sprites/<pet_id>/`），其下每个动作对应一个子目录。
 fn load_all_animations(
     pet_config: &PetConfig,
-    sprites_dir: &Path,
+    char_dir: &Path,
 ) -> Result<HashMap<Action, Animation>> {
     let mut animations = HashMap::new();
 
@@ -287,25 +333,9 @@ fn load_all_animations(
             continue;
         }
 
-        let mut frames = Vec::new();
-        for i in 1..=action_cfg.frame_count {
-            let file_name = format!("{:03}.png", i);
-            let path = sprites_dir.join(action_name).join(file_name);
-
-            let img = image::open(&path)
-                .with_context(|| format!("Failed to load sprite: {:?}", path))?
-                .to_rgba8();
-            frames.push(Arc::new(img));
-        }
-
-        animations.insert(
-            action,
-            Animation {
-                frames,
-                frame_duration: Duration::from_millis(action_cfg.frame_duration_ms),
-                looped: action_cfg.looped,
-            },
-        );
+        let dir = char_dir.join(action_name);
+        let anim = load_animation_dir(&dir, action_cfg.frame_count, action_cfg.frame_duration_ms, action_cfg.looped)?;
+        animations.insert(action, anim);
     }
 
     if !animations.contains_key(&Action::Idle) {

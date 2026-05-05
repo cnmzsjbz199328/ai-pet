@@ -8,6 +8,7 @@ use crate::scripting::{Action, EngineError};
 pub type Texture = Arc<image::RgbaImage>;
 
 /// 单个动作的帧序列与播放配置。
+#[derive(Clone)]
 pub struct Animation {
     pub frames: Vec<Texture>,
     pub frame_duration: Duration,
@@ -64,6 +65,56 @@ impl Animator {
 
     pub fn current_action(&self) -> Action {
         self.current_action
+    }
+}
+
+/// 单次特效播放器：持有一个 one-shot `Animation`，播放结束后 `update` 返回 `None`。
+///
+/// 区别于 `Animator`：
+/// - 不依赖 `Action` 作为 key（特效不属于角色动作语义）。
+/// - 自动感知结束状态，调用方可据此清除实例。
+pub struct EffectPlayer {
+    animation: Animation,
+    elapsed: Duration,
+    finished: bool,
+}
+
+impl EffectPlayer {
+    pub fn new(animation: Animation) -> Self {
+        Self {
+            animation,
+            elapsed: Duration::ZERO,
+            finished: false,
+        }
+    }
+
+    /// 推进时间并返回当前帧。
+    ///
+    /// - 返回 `Some(&Texture)` 时动画仍在播放。
+    /// - 返回 `None` 时 one-shot 动画已结束，调用方应丢弃此实例。
+    /// - 对 `looped` 动画永远返回 `Some`。
+    pub fn update(&mut self, delta: Duration) -> Option<&Texture> {
+        if self.finished {
+            return None;
+        }
+
+        self.elapsed += delta;
+        let anim = &self.animation;
+        let frame_ms = anim.frame_duration.as_millis().max(1);
+        let frame_idx = (self.elapsed.as_millis() / frame_ms) as usize;
+
+        if !anim.looped && frame_idx >= anim.frames.len() {
+            self.finished = true;
+            return None;
+        }
+
+        let idx = if anim.looped {
+            frame_idx % anim.frames.len()
+        } else {
+            frame_idx.min(anim.frames.len().saturating_sub(1))
+        };
+
+        Some(&anim.frames[idx])
     }
 }
 

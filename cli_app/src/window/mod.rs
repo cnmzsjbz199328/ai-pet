@@ -15,7 +15,7 @@ use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId, WindowLevel};
 
-use core_engine::animation::Animator;
+use core_engine::animation::{Animation, Animator, EffectPlayer};
 use core_engine::scripting::Action;
 use core_engine::state_machine::{FsmInput, PetState, StateMachine};
 use core_engine::timeline::Timeline;
@@ -64,6 +64,9 @@ pub struct PetApp {
     facing_right: bool,
     /// Walk 时的水平速度（像素/秒）；正数向右，负数向左。
     walk_velocity_x: f64,
+    // --- 特效层 ---
+    shockwave_template: Option<Animation>,
+    effect_player: Option<EffectPlayer>,
 }
 
 impl PetApp {
@@ -80,8 +83,20 @@ impl PetApp {
             mouse_left_pressed: false,
             mouse_press_pos: None,
             is_dragging: false,
-            facing_right: false,       // 精灵原始朝左，默认不镜像
-            walk_velocity_x: -WALK_SPEED, // 初始向左走
+            facing_right: true,
+            walk_velocity_x: WALK_SPEED,
+            shockwave_template: None,
+            effect_player: None,
+        }
+    }
+
+    pub fn set_shockwave_template(&mut self, anim: Animation) {
+        self.shockwave_template = Some(anim);
+    }
+
+    fn trigger_shockwave(&mut self) {
+        if let Some(template) = &self.shockwave_template {
+            self.effect_player = Some(EffectPlayer::new(template.clone()));
         }
     }
 
@@ -143,11 +158,10 @@ impl PetApp {
         frame.fill(0);
 
         // 遍历目标像素，反查源像素（最近邻）
+        // 精灵原始朝左：facing_right=true 时水平镜像，facing_right=false 时原样
         for y in 0..WINDOW_HEIGHT {
             for x in 0..WINDOW_WIDTH {
                 let raw_x = x * SPRITE_WIDTH / WINDOW_WIDTH;
-                // 朝左时水平镜像
-                // 精灵原始朝左：朝右时镜像，朝左时原样
                 let src_x = if facing_right {
                     SPRITE_WIDTH - 1 - raw_x
                 } else {
@@ -162,6 +176,37 @@ impl PetApp {
                 frame[idx + 2] = pixel[2];
                 frame[idx + 3] = pixel[3];
             }
+        }
+
+        // 绘制特效层（叠加在宠物上方）
+        // 特效为对称图形，不应用角色的 facing_right 镜像。
+        // EffectPlayer::update 返回 None 时动画结束，清除实例。
+        let effect_done = if let Some(player) = &mut self.effect_player {
+            match player.update(delta) {
+                Some(effect_texture) => {
+                    for y in 0..WINDOW_HEIGHT {
+                        for x in 0..WINDOW_WIDTH {
+                            let src_x = (x * SPRITE_WIDTH / WINDOW_WIDTH).min(SPRITE_WIDTH - 1);
+                            let src_y = (y * SPRITE_HEIGHT / WINDOW_HEIGHT).min(SPRITE_HEIGHT - 1);
+                            let pixel = effect_texture.get_pixel(src_x as u32, src_y as u32);
+                            if pixel[3] > 0 {
+                                let idx = (y * WINDOW_WIDTH + x) * 4;
+                                frame[idx] = pixel[0];
+                                frame[idx + 1] = pixel[1];
+                                frame[idx + 2] = pixel[2];
+                                frame[idx + 3] = pixel[3];
+                            }
+                        }
+                    }
+                    false
+                }
+                None => true, // one-shot 结束
+            }
+        } else {
+            false
+        };
+        if effect_done {
+            self.effect_player = None;
         }
     }
 
@@ -319,8 +364,14 @@ impl ApplicationHandler for PetApp {
         }
 
         // 2. 推进时间轴，将到期事件的动作同步到 Animator
-        let due = self.timeline.tick(delta);
-        for event in due {
+        // 保留完整 TimelineEvent（含 actor_id），为多宠物扩展保留路径。
+        // cloned().collect() 将借用转为所有权，使后续 &mut self 调用合法。
+        let due_events: Vec<core_engine::scripting::TimelineEvent> =
+            self.timeline.tick(delta).into_iter().cloned().collect();
+        for event in due_events {
+            if event.action == Action::Attack {
+                self.trigger_shockwave();
+            }
             self.animator.set_action(event.action);
         }
 
