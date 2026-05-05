@@ -43,18 +43,18 @@ Format:
 }
 
 Action whitelist and EXACT durations (schedule next event ONLY after current finishes):
-- idle:   looped,     800ms per cycle  (use freely as filler)
-- walk:   looped,     600ms per cycle
-- sleep:  looped,     1000ms per cycle
-- jump:   ONE-SHOT,   400ms total  <- next event must be at least 400ms later
-- attack: ONE-SHOT,   480ms total  <- next event must be at least 480ms later
-- happy:  ONE-SHOT,   600ms total  <- next event must be at least 600ms later
-- angry:  ONE-SHOT,   600ms total  <- next event must be at least 600ms later
+- idle:   looped,    1200ms per cycle  (use freely as filler or breathing room)
+- walk:   looped,     960ms per cycle  (cat moves across screen while walking)
+- sleep:  looped,    1600ms per cycle  (use for long rest segments)
+- jump:   ONE-SHOT,   300ms total  <- next event must be EXACTLY 300ms later
+- attack: ONE-SHOT,   640ms total  <- next event must be EXACTLY 640ms later
+- happy:  ONE-SHOT,   640ms total  <- next event must be EXACTLY 640ms later
+- angry:  ONE-SHOT,   480ms total  <- next event must be EXACTLY 480ms later
 
 Rules:
-1. ONE-SHOT actions play once and freeze on the last frame — always schedule the next event at EXACTLY the one-shot duration after it starts.
+1. ONE-SHOT actions play once and freeze on the last frame — always schedule the next event at EXACTLY the one-shot duration after it starts, no more, no less.
 2. Looped actions continue until replaced — you may let them run as long as you like.
-3. Total duration should be around 60 seconds (aim for rich, varied storytelling).
+3. Total duration should be around 60 seconds (aim for rich, varied storytelling using ALL action types).
 4. Unknown actions are forbidden.";
 
 // ---------------------------------------------------------------------------

@@ -30,6 +30,8 @@ const WINDOW_WIDTH: usize = 128;
 const WINDOW_HEIGHT: usize = 128;
 /// 鼠标移动超过此距离（物理像素）才视为拖拽，否则视为点击。
 const DRAG_THRESHOLD: f64 = 5.0;
+/// Walk 时的水平移动速度（物理像素/秒）。
+const WALK_SPEED: f64 = 80.0;
 
 /// 持有窗口渲染状态与跨线程消息接收端。
 pub struct PetApp {
@@ -57,6 +59,11 @@ pub struct PetApp {
     mouse_left_pressed: bool,
     mouse_press_pos: Option<PhysicalPosition<f64>>,
     is_dragging: bool,
+    // --- 方向与移动 ---
+    /// true = 朝右（默认），false = 朝左（精灵水平镜像）。
+    facing_right: bool,
+    /// Walk 时的水平速度（像素/秒）；正数向右，负数向左。
+    walk_velocity_x: f64,
 }
 
 impl PetApp {
@@ -73,6 +80,8 @@ impl PetApp {
             mouse_left_pressed: false,
             mouse_press_pos: None,
             is_dragging: false,
+            facing_right: false,       // 精灵原始朝左，默认不镜像
+            walk_velocity_x: -WALK_SPEED, // 初始向左走
         }
     }
 
@@ -111,6 +120,7 @@ impl PetApp {
     }
 
     /// 将当前动画帧写入 pixels 缓冲（最近邻插值，80×64 → 128×128）。
+    /// 根据 `facing_right` 决定是否水平镜像精灵。
     fn draw_sprite(&mut self, delta: std::time::Duration) {
         let texture = match self.animator.update(delta) {
             Ok(t) => t,
@@ -119,6 +129,9 @@ impl PetApp {
                 return;
             }
         };
+
+        // 在持有 texture 引用之前读取 Copy 字段，规避借用冲突。
+        let facing_right = self.facing_right;
 
         let pixels = match &mut self.pixels {
             Some(p) => p,
@@ -132,7 +145,15 @@ impl PetApp {
         // 遍历目标像素，反查源像素（最近邻）
         for y in 0..WINDOW_HEIGHT {
             for x in 0..WINDOW_WIDTH {
-                let src_x = (x * SPRITE_WIDTH / WINDOW_WIDTH).min(SPRITE_WIDTH - 1);
+                let raw_x = x * SPRITE_WIDTH / WINDOW_WIDTH;
+                // 朝左时水平镜像
+                // 精灵原始朝左：朝右时镜像，朝左时原样
+                let src_x = if facing_right {
+                    SPRITE_WIDTH - 1 - raw_x
+                } else {
+                    raw_x
+                }
+                .min(SPRITE_WIDTH - 1);
                 let src_y = (y * SPRITE_HEIGHT / WINDOW_HEIGHT).min(SPRITE_HEIGHT - 1);
                 let pixel = texture.get_pixel(src_x as u32, src_y as u32);
                 let idx = (y * WINDOW_WIDTH + x) * 4;
@@ -143,12 +164,54 @@ impl PetApp {
             }
         }
     }
+
+    /// Walk 动作时自动移动窗口，碰壁后反弹并翻转朝向。
+    /// 拖拽期间跳过，避免与用户操作冲突。
+    fn update_walk_movement(&mut self, delta: std::time::Duration) {
+        if self.animator.current_action() != Action::Walk || self.is_dragging {
+            return;
+        }
+
+        let window = match &self.window {
+            Some(w) => Arc::clone(w),
+            None => return,
+        };
+
+        let current_pos = match window.outer_position() {
+            Ok(pos) => pos,
+            Err(_) => return, // 窗口最小化等特殊状态下跳过
+        };
+
+        let monitor_size = match window.current_monitor() {
+            Some(m) => m.size(),
+            None => return,
+        };
+
+        let dt = delta.as_secs_f64();
+        let dx = self.walk_velocity_x * dt;
+        let new_x_f = current_pos.x as f64 + dx;
+        let max_x = (monitor_size.width as i32) - (WINDOW_WIDTH as i32);
+
+        let (new_x, bounced) = if new_x_f < 0.0 {
+            (0, true)
+        } else if new_x_f > max_x as f64 {
+            (max_x, true)
+        } else {
+            (new_x_f as i32, false)
+        };
+
+        if bounced {
+            self.walk_velocity_x = -self.walk_velocity_x;
+            self.facing_right = self.walk_velocity_x > 0.0;
+        }
+
+        window.set_outer_position(PhysicalPosition::new(new_x, current_pos.y));
+    }
 }
 
 impl ApplicationHandler for PetApp {
-    /// 每次事件循环迭代开始时调用，确保 Poll 模式持续生效。
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: winit::event::StartCause) {
-        // 不再强制设置为 Poll，而是由 about_to_wait 控制
+        // 控制流由 about_to_wait 末尾的 WaitUntil 驱动
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -273,7 +336,10 @@ impl ApplicationHandler for PetApp {
             self.animator.set_action(Action::Idle);
         }
 
-        // 5. 更新帧缓冲并直接渲染
+        // 5. Walk 时自动移动窗口（先移动再渲染，保证位置与画面一致）
+        self.update_walk_movement(delta);
+
+        // 6. 更新帧缓冲并直接渲染
         self.draw_sprite(delta);
         if let Some(pixels) = &mut self.pixels {
             if let Err(err) = pixels.render() {
@@ -282,9 +348,9 @@ impl ApplicationHandler for PetApp {
             }
         }
 
-        // 6. 避免死锁并控制帧率：使用 WaitUntil (30fps)
+        // 7. 控制帧率：WaitUntil 30fps
         event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(
-            std::time::Instant::now() + std::time::Duration::from_millis(33)
+            std::time::Instant::now() + std::time::Duration::from_millis(33),
         ));
     }
 }

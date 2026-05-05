@@ -182,30 +182,64 @@ fn spawn_daemon_process() -> Result<()> {
 // 守护进程主体：窗口 + IPC 循环
 // ---------------------------------------------------------------------------
 
+/// 返回 assets/ 目录：优先取可执行文件同级目录，回退到当前目录。
+fn assets_dir() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|p| p.join("assets")))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("assets"))
+}
+
 /// 守护子进程调用：加载资产、启动 Tokio / IPC、运行 winit 事件循环。
 fn run_daemon() -> Result<()> {
+    let assets = assets_dir();
+    tracing::info!("Assets dir: {:?}", assets);
+
     // 1. 加载配置
-    let config_path = Path::new("assets/config/pet_config.json");
-    let config_json = std::fs::read_to_string(config_path)
+    let config_path = assets.join("config/pet_config.json");
+    let config_json = std::fs::read_to_string(&config_path)
         .with_context(|| format!("Failed to read config: {:?}", config_path))?;
     let config: PetConfig = serde_json::from_str(&config_json)?;
 
     // 2. 加载精灵图
-    let animations = load_all_animations(&config, Path::new("assets/sprites"))?;
+    let animations = load_all_animations(&config, &assets.join("sprites"))?;
     let animator = Animator::new(animations);
 
     // 3. 设置 LLM 客户端（优先使用 GEMINI_API_KEY，其次 Mock）
-    let llm: Arc<dyn LlmClient> = if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+    let gemini_key = std::env::var("GEMINI_API_KEY").ok().filter(|k| !k.is_empty());
+    let llm: Arc<dyn LlmClient> = if let Some(key) = gemini_key {
         tracing::info!("Using Gemini LLM client");
         Arc::new(GeminiClient::new(key))
     } else {
         tracing::warn!("GEMINI_API_KEY not found, falling back to Mock LLM client");
         Arc::new(MockLlmClient {
+            // 兜底剧情：约 60 秒，覆盖全部 7 种动作
+            // 时间轴按实际帧时长精确排列，消除末帧冻结
             preset_response: r#"{
                 "characters": ["pet1"],
                 "events": [
-                    {"timestamp_ms": 0, "actor_id": "pet1", "action": "happy"},
-                    {"timestamp_ms": 1000, "actor_id": "pet1", "action": "idle"}
+                    {"timestamp_ms":     0, "actor_id": "pet1", "action": "idle"},
+                    {"timestamp_ms":  2400, "actor_id": "pet1", "action": "happy"},
+                    {"timestamp_ms":  3040, "actor_id": "pet1", "action": "walk"},
+                    {"timestamp_ms": 10000, "actor_id": "pet1", "action": "jump"},
+                    {"timestamp_ms": 10300, "actor_id": "pet1", "action": "walk"},
+                    {"timestamp_ms": 15000, "actor_id": "pet1", "action": "angry"},
+                    {"timestamp_ms": 15480, "actor_id": "pet1", "action": "attack"},
+                    {"timestamp_ms": 16120, "actor_id": "pet1", "action": "attack"},
+                    {"timestamp_ms": 16760, "actor_id": "pet1", "action": "jump"},
+                    {"timestamp_ms": 17060, "actor_id": "pet1", "action": "walk"},
+                    {"timestamp_ms": 21000, "actor_id": "pet1", "action": "idle"},
+                    {"timestamp_ms": 23400, "actor_id": "pet1", "action": "sleep"},
+                    {"timestamp_ms": 40000, "actor_id": "pet1", "action": "idle"},
+                    {"timestamp_ms": 42400, "actor_id": "pet1", "action": "happy"},
+                    {"timestamp_ms": 43040, "actor_id": "pet1", "action": "walk"},
+                    {"timestamp_ms": 50000, "actor_id": "pet1", "action": "angry"},
+                    {"timestamp_ms": 50480, "actor_id": "pet1", "action": "attack"},
+                    {"timestamp_ms": 51120, "actor_id": "pet1", "action": "jump"},
+                    {"timestamp_ms": 51420, "actor_id": "pet1", "action": "walk"},
+                    {"timestamp_ms": 57000, "actor_id": "pet1", "action": "idle"},
+                    {"timestamp_ms": 58200, "actor_id": "pet1", "action": "sleep"}
                 ]
             }"#
             .to_string(),
