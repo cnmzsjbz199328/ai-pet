@@ -266,7 +266,9 @@ fn run_daemon() -> Result<()> {
     let (tx, rx) = std::sync::mpsc::channel();
 
     // 6. 启动 Tokio 运行时并运行 IPC 服务端
+    // IPC 服务端只需一个并发任务，限制线程数为 1 避免默认按 CPU 核数生成线程池
     let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
         .enable_all()
         .build()?;
 

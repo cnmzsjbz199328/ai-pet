@@ -33,6 +33,45 @@ const DRAG_THRESHOLD: f64 = 5.0;
 /// Walk 时的水平移动速度（物理像素/秒）。
 const WALK_SPEED: f64 = 80.0;
 
+// ---------------------------------------------------------------------------
+// 编译期像素缩放查找表（最近邻插值）
+// ---------------------------------------------------------------------------
+// 所有尺寸均为编译期常量，查找表在编译时计算，运行时零开销。
+// 代替内层循环中的 x * SPRITE_WIDTH / WINDOW_WIDTH（每帧 16,384 次整数除法）。
+
+/// 目标 x 坐标 → 精灵 x 坐标（朝左，原始方向）
+const X_MAP: [usize; WINDOW_WIDTH] = {
+    let mut arr = [0usize; WINDOW_WIDTH];
+    let mut i = 0;
+    while i < WINDOW_WIDTH {
+        arr[i] = i * SPRITE_WIDTH / WINDOW_WIDTH;
+        i += 1;
+    }
+    arr
+};
+
+/// 目标 x 坐标 → 精灵 x 坐标（朝右，水平镜像）
+const X_MAP_MIRROR: [usize; WINDOW_WIDTH] = {
+    let mut arr = [0usize; WINDOW_WIDTH];
+    let mut i = 0;
+    while i < WINDOW_WIDTH {
+        arr[i] = SPRITE_WIDTH - 1 - i * SPRITE_WIDTH / WINDOW_WIDTH;
+        i += 1;
+    }
+    arr
+};
+
+/// 目标 y 坐标 → 精灵 y 坐标
+const Y_MAP: [usize; WINDOW_HEIGHT] = {
+    let mut arr = [0usize; WINDOW_HEIGHT];
+    let mut i = 0;
+    while i < WINDOW_HEIGHT {
+        arr[i] = i * SPRITE_HEIGHT / WINDOW_HEIGHT;
+        i += 1;
+    }
+    arr
+};
+
 /// 持有窗口渲染状态与跨线程消息接收端。
 pub struct PetApp {
     /// 来自 Tokio 任务的消息通道接收端。
@@ -67,6 +106,10 @@ pub struct PetApp {
     // --- 特效层 ---
     shockwave_template: Option<Animation>,
     effect_player: Option<EffectPlayer>,
+    // --- 缓存值（避免每帧 syscall）---
+    /// 当前显示器宽度（物理像素），Walk 时用于边界检测。
+    /// 在窗口初始化时读取一次，避免每帧调用 current_monitor()。
+    monitor_width: u32,
 }
 
 impl PetApp {
@@ -87,6 +130,7 @@ impl PetApp {
             walk_velocity_x: WALK_SPEED,
             shockwave_template: None,
             effect_player: None,
+            monitor_width: 1920, // 默认值；窗口初始化后从 current_monitor() 更新
         }
     }
 
@@ -128,6 +172,10 @@ impl PetApp {
         };
 
         self.pixels = Some(pixels);
+        // 缓存显示器宽度，避免 update_walk_movement 每帧调用 current_monitor()
+        if let Some(monitor) = window.current_monitor() {
+            self.monitor_width = monitor.size().width;
+        }
         self.window = Some(window);
         self.last_tick = Instant::now();
         tracing::info!("Window created and pixels initialized");
@@ -154,47 +202,45 @@ impl PetApp {
         };
 
         let frame = pixels.frame_mut();
-        // 清空为全透明
+        // 清空为全透明（精灵有透明区域，必须每帧重置）
         frame.fill(0);
 
-        // 遍历目标像素，反查源像素（最近邻）
-        // 精灵原始朝左：facing_right=true 时水平镜像，facing_right=false 时原样
+        // 遍历目标像素，通过编译期 LUT 反查源像素（最近邻，零运行时除法）。
+        // 精灵原始朝左：facing_right=true 时使用镜像 LUT，false 时使用原始 LUT。
+        // 用 .as_raw() 直接访问底层字节切片，消除 get_pixel() 的边界检查开销。
+        let x_lut = if facing_right { &X_MAP_MIRROR } else { &X_MAP };
+        let sprite_raw = texture.as_raw(); // &[u8], stride = SPRITE_WIDTH * 4 bytes
         for y in 0..WINDOW_HEIGHT {
+            let sy = Y_MAP[y];
+            let dst_row = y * WINDOW_WIDTH;
+            let src_row = sy * SPRITE_WIDTH;
             for x in 0..WINDOW_WIDTH {
-                let raw_x = x * SPRITE_WIDTH / WINDOW_WIDTH;
-                let src_x = if facing_right {
-                    SPRITE_WIDTH - 1 - raw_x
-                } else {
-                    raw_x
-                }
-                .min(SPRITE_WIDTH - 1);
-                let src_y = (y * SPRITE_HEIGHT / WINDOW_HEIGHT).min(SPRITE_HEIGHT - 1);
-                let pixel = texture.get_pixel(src_x as u32, src_y as u32);
-                let idx = (y * WINDOW_WIDTH + x) * 4;
-                frame[idx] = pixel[0];
-                frame[idx + 1] = pixel[1];
-                frame[idx + 2] = pixel[2];
-                frame[idx + 3] = pixel[3];
+                let sx = x_lut[x];
+                let src_idx = (src_row + sx) * 4;
+                let dst_idx = (dst_row + x) * 4;
+                frame[dst_idx..dst_idx + 4].copy_from_slice(&sprite_raw[src_idx..src_idx + 4]);
             }
         }
 
         // 绘制特效层（叠加在宠物上方）
-        // 特效为对称图形，不应用角色的 facing_right 镜像。
+        // 特效为对称图形，不应用角色的 facing_right 镜像，使用原始 X_MAP。
         // EffectPlayer::update 返回 None 时动画结束，清除实例。
         let effect_done = if let Some(player) = &mut self.effect_player {
             match player.update(delta) {
                 Some(effect_texture) => {
+                    let effect_raw = effect_texture.as_raw();
                     for y in 0..WINDOW_HEIGHT {
+                        let sy = Y_MAP[y];
+                        let dst_row = y * WINDOW_WIDTH;
+                        let src_row = sy * SPRITE_WIDTH;
                         for x in 0..WINDOW_WIDTH {
-                            let src_x = (x * SPRITE_WIDTH / WINDOW_WIDTH).min(SPRITE_WIDTH - 1);
-                            let src_y = (y * SPRITE_HEIGHT / WINDOW_HEIGHT).min(SPRITE_HEIGHT - 1);
-                            let pixel = effect_texture.get_pixel(src_x as u32, src_y as u32);
-                            if pixel[3] > 0 {
-                                let idx = (y * WINDOW_WIDTH + x) * 4;
-                                frame[idx] = pixel[0];
-                                frame[idx + 1] = pixel[1];
-                                frame[idx + 2] = pixel[2];
-                                frame[idx + 3] = pixel[3];
+                            let sx = X_MAP[x];
+                            let src_idx = (src_row + sx) * 4;
+                            let alpha = effect_raw[src_idx + 3];
+                            if alpha > 0 {
+                                let dst_idx = (dst_row + x) * 4;
+                                frame[dst_idx..dst_idx + 4]
+                                    .copy_from_slice(&effect_raw[src_idx..src_idx + 4]);
                             }
                         }
                     }
@@ -227,15 +273,11 @@ impl PetApp {
             Err(_) => return, // 窗口最小化等特殊状态下跳过
         };
 
-        let monitor_size = match window.current_monitor() {
-            Some(m) => m.size(),
-            None => return,
-        };
-
         let dt = delta.as_secs_f64();
         let dx = self.walk_velocity_x * dt;
         let new_x_f = current_pos.x as f64 + dx;
-        let max_x = (monitor_size.width as i32) - (WINDOW_WIDTH as i32);
+        // 使用缓存的显示器宽度，避免每帧调用 current_monitor()（Win32 syscall）
+        let max_x = (self.monitor_width as i32) - (WINDOW_WIDTH as i32);
 
         let (new_x, bounced) = if new_x_f < 0.0 {
             (0, true)
